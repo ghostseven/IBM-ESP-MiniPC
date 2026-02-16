@@ -2,16 +2,13 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 
-// ==========================================
-// HARDWARE KONFIGURATION
-// ==========================================
-// Display: SH1106 I2C (SCL an Pin 22, SDA an Pin 21)
-U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE, 22, 21);
+// SH1106 128x64 I2C - Init display
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
 
-const int LED_PIN = 23;  // Rote HDD LED (über Widerstand!)
+const int LED_PIN = 23;  // HDD LED pin
 const int TOUCH_PIN = 4; // TTP223 Touch Sensor (Signal)
 
-const unsigned long SWITCH_INTERVAL = 20000; // Auto-Wechsel alle 20s
+int lastTouchState = LOW;
 
 // ==========================================
 // IBM LOGO BITMAP (72x34 Pixel)
@@ -44,92 +41,44 @@ const unsigned char ibm_logo_bits[] U8X8_PROGMEM = {
     0xfc, 0x7f, 0xfe, 0xff, 0x07, 0xff, 0x41, 0xe0, 0x3f, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-// --- GLOBALE VARIABLEN ---
-int currentMode = 0; // 0=Hacker, 1=Matrix, 2=Pong, 3=Snake
-unsigned long lastSwitchTime = 0;
-int lastTouchState = LOW;
-
-// ==========================================
-// MODULE 0: IBM LOGO
-// ==========================================
-
-void resetIBMLogo()
+// Enum to group and cycle the demo modes.
+enum DemoMode
 {
-  u8g2.clearBuffer();
-}
+  DEMO_LOGO,
+  DEMO_BIOS,
+  DEMO_BOOT,
+  DEMO_WORDSTAR,
+  DEMO_MATRIX,
+  DEMO_PONG,
+  DEMO_SNAKE
+};
+// Set initial demo to start on (IBM Logo)
+DemoMode mode = DEMO_LOGO;
 
-void runIBMLogo()
-{
-  u8g2.clearBuffer();
-  u8g2.drawXBMP(28, 15, 72, 34, ibm_logo_bits);
-  u8g2.sendBuffer();
-}
+unsigned long lastSwitch = 0;
+int demoDuration = 5000; // ms per demo
 
-// ==========================================
-// MODUL 1: HACKER TERMINAL
-// ==========================================
-const int TERM_LINES = 6;
-const int TERM_HEIGHT = 10;
-String termBuffer[TERM_LINES];
-const char *phrases[] = {
-    "CONNECTING...", "UPLOADING VIRUS", "BYPASSING FIREWALL",
-    "ACCESS GRANTED", "DECRYPTING KEY...", "DOWNLOADING DATA",
-    "SYSTEM OVERRIDE", "ROOT ACCESS: YES", "SCANNING PORTS...",
-    "INITIALIZING...", "BUFFER OVERFLOW", "TRACING IP...",
-    "COMPILING...", "UPDATING KERNEL"};
+// Cursor blink
+bool cursor = true;
+unsigned long lastBlink = 0;
 
-void resetHacker()
-{
-  for (int i = 0; i < TERM_LINES; i++)
-    termBuffer[i] = "";
-}
+// IBM 5150 BIOS state
+unsigned long biosStart = 0;
+bool biosInit = false;
+int memKB = 0;
 
-String getHexDump()
-{
-  String hexLine = "";
-  for (int i = 0; i < 3; i++)
-  {
-    int r = random(0, 255);
-    if (r < 16)
-      hexLine += "0";
-    hexLine += String(r, HEX) + " ";
-  }
-  hexLine.toUpperCase();
-  return hexLine;
-}
+// WordStar typing state
+const char *wsText[] = {
+    "This is WordStar on ESP32.",
+    "Running inside a demo loop.",
+    "",
+    "The quick brown fox jumps",
+    "over the lazy dog."};
+int wsLine = 0;
+int wsChar = 0;
+unsigned long lastType = 0;
 
-void runHacker()
-{
-  u8g2.setFont(u8g2_font_micro_tr);
-  String nextLine;
-  if (random(0, 10) < 4)
-    nextLine = phrases[random(0, 14)];
-  else
-    nextLine = "MEM: " + getHexDump();
-  for (int i = 0; i < TERM_LINES - 1; i++)
-    termBuffer[i] = termBuffer[i + 1];
-  termBuffer[TERM_LINES - 1] = "> " + nextLine;
-  u8g2.clearBuffer();
-  for (int i = 0; i < TERM_LINES; i++)
-  {
-    u8g2.setCursor(0, (i + 1) * TERM_HEIGHT - 1);
-    u8g2.print(termBuffer[i]);
-  }
-  if (millis() % 500 < 250)
-  {
-    u8g2.setCursor(120, 63);
-    u8g2.print("_");
-  }
-  u8g2.sendBuffer();
-  digitalWrite(LED_PIN, HIGH);
-  delay(random(20, 50));
-  digitalWrite(LED_PIN, LOW);
-  delay(random(50, 200));
-}
-
-// ==========================================
-// MODUL 2: MATRIX RAIN
-// ==========================================
+// Matrix State
 const int M_COLS = 16;
 const int M_LEN = 8;
 struct MatrixDrop
@@ -142,6 +91,160 @@ struct MatrixDrop
 
 MatrixDrop drops[M_COLS];
 int getRandomGlyph() { return (random(0, 10) > 2) ? random(12448, 12530) : random(12448, 12530); }
+
+// Pong state
+float ballX, ballY, dirX, dirY, p1Y, p2Y;
+int score1, score2;
+const int PW = 3, PH = 12;
+
+// Snake state
+const int GRID_SIZE = 4;
+const int GRID_W = 128 / GRID_SIZE;
+const int GRID_H = 64 / GRID_SIZE;
+struct Point
+{
+  int x;
+  int y;
+};
+
+Point snake[100];
+int snakeLen = 4;
+Point food;
+int sDirX = 1, sDirY = 0;
+
+// ================= HELPERS =================
+
+void blinkCursor()
+{
+  if (millis() - lastBlink > 400)
+  {
+    lastBlink = millis();
+    cursor = !cursor;
+  }
+}
+
+// ================= IBM LOGO =================
+void drawIBMLogo()
+{
+  u8g2.clearBuffer();
+  u8g2.drawXBMP(28, 15, 72, 34, ibm_logo_bits);
+  u8g2.sendBuffer();
+}
+
+// ================= BIOS =================
+void drawBIOS()
+{
+  if (!biosInit)
+  {
+    biosInit = true;
+    biosStart = millis();
+    memKB = 0;
+  }
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_5x7_tr);
+
+  // Top lines exactly like early IBM POST style
+  u8g2.drawStr(0, 10, "IBM Personal Computer");
+  u8g2.drawStr(0, 18, "");
+
+  // Memory count up animation (classic effect)
+  unsigned long t = millis() - biosStart;
+  if (t > 200 && memKB < 640)
+  {
+    memKB += 16; // step size for visual speed
+  }
+
+  char memLine[32];
+  sprintf(memLine, "%d KB OK", memKB);
+  u8g2.drawStr(0, 30, memLine);
+
+  // After memory completes, show ROM BASIC message
+  if (memKB >= 640)
+  {
+    u8g2.drawStr(0, 42, "");
+    u8g2.drawStr(0, 50, "BASIC ROM OK");
+  }
+
+  u8g2.sendBuffer();
+}
+
+// ================= DOS BOOT =================
+void drawBoot()
+{
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_5x7_tr);
+
+  u8g2.drawStr(0, 10, "IBM Cassette BASIC Version C1.00");
+  u8g2.drawStr(0, 20, "Copyright IBM Corp 1981");
+
+  if (cursor)
+    u8g2.drawStr(0, 40, "Ok");
+
+  u8g2.sendBuffer();
+}
+
+// ================= WORDSTAR =================
+void updateWordStar()
+{
+  if (millis() - lastType > 40)
+  {
+    lastType = millis();
+    wsChar++;
+
+    if (wsChar > strlen(wsText[wsLine]))
+    {
+      wsLine++;
+      wsChar = 0;
+
+      if (wsLine >= 7)
+      {
+        delay(1000);
+        wsLine = 0;
+        wsChar = 0;
+      }
+    }
+  }
+}
+
+void drawWordStar()
+{
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_5x7_tr);
+
+  // Title bar
+  u8g2.drawBox(0, 0, 128, 10);
+  u8g2.setDrawColor(0);
+  u8g2.drawStr(2, 8, "WordStar 3.3  DEMO.TXT");
+  u8g2.setDrawColor(1);
+
+  // Menu
+  u8g2.drawStr(0, 18, "^K ^S ^D ^X ^F ^Q");
+
+  // Text
+  int y = 30;
+  for (int i = 0; i <= wsLine; i++)
+  {
+    String line = wsText[i];
+    if (i == wsLine)
+      line = line.substring(0, wsChar);
+    u8g2.drawStr(0, y, line.c_str());
+    y += 8;
+  }
+
+  // Cursor
+  if (cursor)
+  {
+    int x = u8g2.getStrWidth(
+        String(wsText[wsLine]).substring(0, wsChar).c_str());
+    int ycur = 30 + wsLine * 8 - 6;
+    u8g2.drawBox(x, ycur, 5, 7);
+  }
+
+  u8g2.sendBuffer();
+}
+
+// ================= MATRIX =================
 void resetMatrixDrop(int i, bool randomY)
 {
   drops[i].y = randomY ? random(-100, 0) : -(drops[i].length * 10);
@@ -157,7 +260,7 @@ void resetMatrixAll()
     resetMatrixDrop(i, true);
 }
 
-void runMatrix()
+void drawMatrix()
 {
   u8g2.setFont(u8g2_font_b10_t_japanese1);
   u8g2.clearBuffer();
@@ -190,13 +293,7 @@ void runMatrix()
   }
 }
 
-// ==========================================
-// MODUL 3: PONG (Mit 9-Punkte-Reset)
-// ==========================================
-float ballX, ballY, dirX, dirY, p1Y, p2Y;
-int score1, score2;
-const int PW = 3, PH = 12;
-
+// ================= PONG =================
 void resetPong()
 {
   ballX = 64;
@@ -218,7 +315,7 @@ void resetBall()
   delay(200);
 }
 
-void runPong()
+void drawPong()
 {
   u8g2.setFont(u8g2_font_micro_tr);
   u8g2.clearBuffer();
@@ -310,23 +407,7 @@ void runPong()
   }
 }
 
-// ==========================================
-// MODUL 4: AUTO-SNAKE (Robust & Fix)
-// ==========================================
-const int GRID_SIZE = 4;
-const int GRID_W = 128 / GRID_SIZE;
-const int GRID_H = 64 / GRID_SIZE;
-struct Point
-{
-  int x;
-  int y;
-};
-
-Point snake[100];
-int snakeLen = 4;
-Point food;
-int sDirX = 1, sDirY = 0;
-
+// ================= SNAKE =================
 bool isCollision(int x, int y)
 {
   if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H)
@@ -361,7 +442,7 @@ void resetSnake()
   spawnFood();
 }
 
-void runSnake()
+void drawSnake()
 {
   Point head = snake[0];
   int wishX = 0, wishY = 0;
@@ -453,117 +534,107 @@ void runSnake()
   delay(60);
 }
 
-// ==========================================
-// MAIN SETUP (MIT IBM BOOT LOGO)
-// ==========================================
+// ================= SETUP =================
 void setup()
 {
   pinMode(LED_PIN, OUTPUT);
   pinMode(TOUCH_PIN, INPUT); // TTP223
 
-  u8g2.setBusClock(400000);
   u8g2.begin();
-
-  // --- BOOT SEQUENZ ANFANG ---
-
-  // 1. IBM Logo zeichnen (zentriert)
-  // Das Logo ist 72px breit und 34px hoch.
-  // X = (128-72)/2 = 28
-  // Y = (64-34)/2 = 15
-  // u8g2.clearBuffer();
-  // u8g2.drawXBMP(28, 15, 72, 34, ibm_logo_bits);
-  // u8g2.sendBuffer();
-
-  runIBMLogo();
-
-  // 2. LED "POST" Check (zweimal kurz blinken)
-  digitalWrite(LED_PIN, HIGH);
-  delay(100);
-  digitalWrite(LED_PIN, LOW);
-  delay(100);
-  digitalWrite(LED_PIN, HIGH);
-  delay(100);
-  digitalWrite(LED_PIN, LOW);
-
-  // 3. Warten (Boot-Dauer)
-  delay(5000);
-
-  // --- BOOT SEQUENZ ENDE ---
+  u8g2.setBusClock(400000);
+  u8g2.setFont(u8g2_font_5x7_tr);
 
   randomSeed(analogRead(0));
-  resetHacker();
   resetMatrixAll();
   resetPong();
   resetSnake();
-  lastSwitchTime = millis();
 }
 
-// ==========================================
-// LOOP (MIT TOUCH & AUTO-SWITCH)
-// ==========================================
+// ================= LOOP =================
 void loop()
 {
-  bool switchMode = false;
+  blinkCursor();
 
-  // 1. TOUCH SENSOR CHECK
+  bool changeMode = false;
+
+  // Check for touch sensor press
   int touchState = digitalRead(TOUCH_PIN);
   if (touchState == HIGH && lastTouchState == LOW)
   {
-    // Flanke erkannt (Finger hat gerade berührt)
-    switchMode = true;
-    delay(50); // Kleines Entprellen
+    changeMode = true;
+    delay(50);
   }
   lastTouchState = touchState;
 
-  // 2. TIMER CHECK
-  if (millis() - lastSwitchTime > SWITCH_INTERVAL)
+  // Auto change based on time
+  if (millis() - lastSwitch > demoDuration)
   {
-    switchMode = true;
+    changeMode = true;
   }
 
-  // 3. MODUS WECHSELN?
-  if (switchMode)
+  if (changeMode)
   {
-    lastSwitchTime = millis(); // Timer zurücksetzen
-    currentMode++;
-    if (currentMode > 4)
-      currentMode = 0;
+    lastSwitch = millis();
+    mode = (DemoMode)((mode + 1) % 7);
 
-    // Reset Logic
-    if (currentMode == 0)
-      resetHacker();
-    if (currentMode == 1)
-      resetMatrixAll();
-    if (currentMode == 2)
-      resetPong();
-    if (currentMode == 3)
+    switch (mode)
+    {
+    case DEMO_BIOS:
+      biosInit = false;
+      break;
+    case DEMO_WORDSTAR:
+      break;
+    case DEMO_SNAKE:
       resetSnake();
-    if (currentMode == 4)
-      resetIBMLogo();
-
-    // Kurzes LED Feedback beim Umschalten
+      break;
+    case DEMO_MATRIX:
+      resetMatrixAll();
+      break;
+    case DEMO_PONG:
+      resetPong();
+      break;
+    }
     digitalWrite(LED_PIN, HIGH);
     delay(100);
     digitalWrite(LED_PIN, LOW);
   }
 
-  // Programm ausführen
-  switch (currentMode)
+  switch (mode)
   {
-  case 0:
-    runHacker();
+  case DEMO_LOGO:
+    demoDuration = 5000;
+    drawIBMLogo();
     break;
-  case 1:
-    runMatrix();
+
+  case DEMO_BIOS:
+    demoDuration = 5000;
+    drawBIOS();
     break;
-  case 2:
-    runPong();
+
+  case DEMO_BOOT:
+    demoDuration = 8000;
+    drawBoot();
     break;
-  case 3:
-    runSnake();
+
+  case DEMO_WORDSTAR:
+    demoDuration = 8000;
+    updateWordStar();
+    drawWordStar();
     break;
-  case 4:
-    runIBMLogo();
+
+  case DEMO_MATRIX:
+    demoDuration = 20000;
+    drawMatrix();
+    break;
+
+  case DEMO_PONG:
+    demoDuration = 20000;
+    drawPong();
+    break;
+
+  case DEMO_SNAKE:
+    demoDuration = 20000;
+    drawSnake();
     break;
   }
 }
