@@ -73,7 +73,9 @@ const char *wsText[] = {
     "Running inside a demo loop.",
     "",
     "The quick brown fox jumps",
-    "over the lazy dog."};
+    "over the lazy dog.",
+    "",
+    "Retro text lives forever."};
 int wsLine = 0;
 int wsChar = 0;
 unsigned long lastType = 0;
